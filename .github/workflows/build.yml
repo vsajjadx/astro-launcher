@@ -24,13 +24,19 @@ jobs:
           pip install -r requirements.txt
 
       - name: Install vgamepad (without launching its driver installer)
+        # vgamepad's setup.py calls `msiexec /i ...ViGEmBusSetup.msi` as a
+        # side effect of being built/installed on Windows (any setup.py
+        # invocation other than egg_info/sdist triggers it, including
+        # `pip download`'s wheel-build step). That blocks forever on a
+        # non-interactive CI machine. We fetch the sdist tarball directly
+        # from PyPI's file host and copy just the `vgamepad` package into
+        # site-packages, never invoking setup.py at all.
         shell: pwsh
         run: |
-          pip download vgamepad --no-deps -d vg_pkg
+          Invoke-WebRequest -Uri "https://files.pythonhosted.org/packages/8a/54/0eaddc33f84247963af078f364b37153d09fcd6cdc398f243ec3e8842c56/vgamepad-0.1.0.tar.gz" -OutFile vgamepad.tar.gz
           python -c "
           import tarfile, glob, shutil, sysconfig
-          tar_path = glob.glob('vg_pkg/*.tar.gz')[0]
-          with tarfile.open(tar_path) as t:
+          with tarfile.open('vgamepad.tar.gz') as t:
               t.extractall('vg_extract')
           src = glob.glob('vg_extract/vgamepad-*/vgamepad')[0]
           dst = sysconfig.get_paths()['purelib'] + '/vgamepad'
