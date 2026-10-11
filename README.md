@@ -14,6 +14,14 @@ A PS5-styled game **launcher / library front-end** for Windows, built with PyQt6
 - **Save backups, mods/DLC/patch tracking, trainer launching** — per-game metadata and housekeeping, not gameplay modification by this app itself.
 - **Config export** that automatically redacts sensitive fields (tokens, secrets, API keys) before sharing a diagnostic file.
 
+## Screenshots
+
+| Library / history view | Game detail view |
+|---|---|
+| ![History view](screenshots/screenshot-1.png) | ![Game detail view](screenshots/screenshot-2.png) |
+
+Games are grouped into rows by category (History, Combat, Sport, …), each tile shows its platform badge (PC/PS4/etc.), and selecting a game shows full-bleed art with a "Play Game" prompt and session playtime — the PS5-style shell described above.
+
 ## Project layout
 
 ```
