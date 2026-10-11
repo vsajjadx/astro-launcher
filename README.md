@@ -1,16 +1,18 @@
 # Astro Launcher
 
-A Windows desktop launcher for **PS5 Remote Play**, built with PyQt6.
+A PS5-styled game **launcher / library front-end** for Windows, built with PyQt6. It does not emulate or stream anything itself — it organizes and launches games you already have installed, through a console-like interface.
 
-## Features
+## What it actually does
 
-- Game library view with cover art (IGDB / RAWG integration)
-- Virtual gamepad passthrough (via `vgamepad`) so a physical controller is forwarded into Remote Play
-- Raw HID controller access via `hidapi`
-- Optional in-game FPS overlay (lightweight Tk-based overlay, embedded and extracted at runtime)
-- Audio pipeline using `soundfile` / `opuslib` for low-latency sound handling
-- Built-in helper to fetch the official Microsoft Visual C++ Redistributable from Microsoft's own servers (no third-party mirrors)
-- Config export that automatically redacts sensitive fields (tokens, secrets, API keys) before sharing
+- **Game library scanning** — finds installed games under common launcher folders (Steam, Epic Games, GOG, Origin, EA, Ubisoft Connect, Xbox/Game Pass) and console ROM folders, and launches them directly or via `subprocess`.
+- **Optional emulator launching** — if you already have an emulator installed (RPCS3, PCSX2, DuckStation, Ryujinx, Yuzu, Cemu, PPSSPP, Vita3K), you can point a library entry at it with a configurable argument template. The launcher does not bundle, emulate, or reimplement any console hardware itself — it just starts the emulator process you configured, the same way a shortcut would.
+- **Metadata & cover art** — looks up title names and box/cover art via IGDB, RAWG, SteamGridDB, and a large built-in title-normalization table (so "GTA V", "GTA 5", "Grand Theft Auto V" all resolve to one canonical entry).
+- **Controller support** — reads physical controllers via `hidapi` and remaps/forwards input to a virtual Xbox 360 / DualSense controller via `vgamepad`, with deadzone, sensitivity, and adaptive-trigger/haptic tuning for DualSense pads. It relays and remaps a real connected controller, it does not fabricate input.
+- **DualSense Bluetooth audio** — routes controller-speaker/headset audio over the DualSense's Bluetooth HID channel.
+- **In-game FPS/CPU/GPU overlay** — a lightweight Tk-based overlay (packed inside the script and extracted at runtime) showing live performance stats.
+- **"Booster" tweaks** — optional, reversible Windows-level adjustments before launching a game: process priority/affinity, power plan, disabling Game DVR, etc.
+- **Save backups, mods/DLC/patch tracking, trainer launching** — per-game metadata and housekeeping, not gameplay modification by this app itself.
+- **Config export** that automatically redacts sensitive fields (tokens, secrets, API keys) before sharing a diagnostic file.
 
 ## Project layout
 
@@ -35,9 +37,10 @@ The build output is a portable `PS5-Launcher` folder under `dist/` (onedir build
 
 ## Automated builds
 
-This repo includes a GitHub Actions workflow (`.github/workflows/build.yml`) that builds the Windows executable on every push and uploads it as a downloadable artifact — no local Windows machine required. Check the **Actions** tab after pushing, or trigger it manually from there.
+A GitHub Actions workflow (`.github/workflows/build.yml`) builds the Windows executable on every push to `main` and uploads it as a downloadable artifact — check the **Actions** tab, or trigger it manually from there.
 
 ## Requirements
 
 - Python 3.13+
-- Windows 10/11 (the build targets Windows; PyQt6 + `hidapi` + `vgamepad` are Windows-oriented)
+- Windows 10/11 (PyQt6 + `hidapi` + `vgamepad` are Windows-oriented)
+- Any emulators you want to launch through it must be installed and configured separately — none are included.
