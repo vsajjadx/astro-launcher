@@ -5,7 +5,9 @@ PyQt6>=6.11.0
 PyQt6-WebEngine>=6.11.0
 soundfile>=0.14.0
 yt-dlp>=2026.7.4
-vgamepad
+# vgamepad is installed separately in CI (see build.yml) because its
+# installer tries to launch an interactive ViGEmBus driver install on
+# pip install, which hangs on a non-interactive build machine.
 opuslib
 pillow
 pillow-avif-plugin

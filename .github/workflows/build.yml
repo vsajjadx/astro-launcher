@@ -23,6 +23,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Install vgamepad (without launching its driver installer)
+        shell: pwsh
+        run: |
+          pip download vgamepad --no-deps -d vg_pkg
+          python -c "
+          import tarfile, glob, shutil, sysconfig
+          tar_path = glob.glob('vg_pkg/*.tar.gz')[0]
+          with tarfile.open(tar_path) as t:
+              t.extractall('vg_extract')
+          src = glob.glob('vg_extract/vgamepad-*/vgamepad')[0]
+          dst = sysconfig.get_paths()['purelib'] + '/vgamepad'
+          shutil.copytree(src, dst)
+          print('vgamepad package copied to', dst)
+          "
+
       - name: Build with PyInstaller
         run: pyinstaller ps5_launcher.spec
 
