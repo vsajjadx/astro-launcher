@@ -5,6 +5,9 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -52,3 +55,24 @@ jobs:
         with:
           name: PS5-Launcher-windows
           path: dist/PS5-Launcher/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: PS5-Launcher-windows
+          path: PS5-Launcher
+
+      - name: Zip the portable build
+        run: cd PS5-Launcher && zip -r ../PS5-Launcher-windows.zip . 
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Astro Launcher build ${{ github.run_number }}
+          files: PS5-Launcher-windows.zip
+          token: ${{ secrets.GITHUB_TOKEN }}
