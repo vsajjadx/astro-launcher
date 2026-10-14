@@ -45278,7 +45278,121 @@ def _install_freeze_watchdog(threshold: float=0.25, interval: float=0.05, log_pa
     return log_path
 
 
+# ---------------------------------------------------------------------------
+# Re-launch protection
+#
+# In the frozen exe sys.executable IS the launcher.  Several places run
+# [sys.executable, '-m', 'pip', 'install', ...] (first-run dependency setup,
+# yt-dlp / av updates, optional requirements).  Inside the exe that does not
+# run pip -- it starts ANOTHER full launcher, which (the deps flag still not
+# written) runs the same setup again and starts yet another one.  That loop
+# is what filled the taskbar with dozens of launcher icons from one launch.
+# ---------------------------------------------------------------------------
+def _install_frozen_relaunch_guard():
+    """When frozen, refuse to spawn ourselves with python-interpreter style
+    arguments (-m / -c).  Callers already wrap these in try/except."""
+    if not getattr(sys, 'frozen', False):
+        return False
+    _orig_popen = subprocess.Popen
+    _self_exe = os.path.normcase(os.path.abspath(sys.executable))
+
+    class _GuardedPopen(_orig_popen):
+        def __init__(self, args, *a, **kw):
+            try:
+                if isinstance(args, (list, tuple)) and len(args) > 1:
+                    first = os.path.normcase(os.path.abspath(str(args[0])))
+                    if first == _self_exe and str(args[1]) in ('-m', '-c'):
+                        raise OSError('refusing to re-launch the frozen app with interpreter arguments')
+            except OSError:
+                raise
+            except Exception:
+                pass
+            super().__init__(args, *a, **kw)
+    subprocess.Popen = _GuardedPopen
+    return True
+
+
+# Single-instance guard (Windows): a named mutex decides who is first; later
+# launches poke a named event so the running one comes to the front, then exit.
+_SI_MUTEX_NAME = 'Local\\PS5Launcher.SingleInstance.v1'
+_SI_EVENT_NAME = 'Local\\PS5Launcher.SingleInstance.Wake.v1'
+_si_handles = []
+
+
+def _si_kernel32():
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    k32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    k32.CreateMutexW.restype = wintypes.HANDLE
+    k32.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+    k32.OpenEventW.restype = wintypes.HANDLE
+    k32.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+    k32.CreateEventW.restype = wintypes.HANDLE
+    k32.SetEvent.argtypes = [wintypes.HANDLE]
+    k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    k32.WaitForSingleObject.restype = wintypes.DWORD
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return k32
+
+
+def _single_instance_acquire():
+    """True if this is the first instance (or the check is unavailable);
+    False if another launcher is already running (it has been told to show)."""
+    if os.name != 'nt':
+        return True
+    try:
+        k32 = _si_kernel32()
+        h = k32.CreateMutexW(None, False, _SI_MUTEX_NAME)
+        err = ctypes.get_last_error()
+        if not h:
+            return True  # fail open: never block startup on a guard error
+        if err == 183:  # ERROR_ALREADY_EXISTS
+            ev = k32.OpenEventW(0x0002, False, _SI_EVENT_NAME)  # EVENT_MODIFY_STATE
+            if ev:
+                k32.SetEvent(ev)
+                k32.CloseHandle(ev)
+            k32.CloseHandle(h)
+            return False
+        _si_handles.append(h)
+        return True
+    except Exception:
+        return True
+
+
+class _SingleInstanceWaker(QObject):
+    """Runs in the first instance: emits `wake` (on the Qt thread) whenever a
+    second launch pokes the named event."""
+    wake = pyqtSignal()
+
+    def start(self):
+        if os.name != 'nt':
+            return
+        try:
+            k32 = _si_kernel32()
+            ev = k32.CreateEventW(None, False, False, _SI_EVENT_NAME)
+        except Exception:
+            return
+        if not ev:
+            return
+        _si_handles.append(ev)
+
+        def _loop():
+            while True:
+                try:
+                    r = k32.WaitForSingleObject(ev, 0xFFFFFFFF)
+                except Exception:
+                    return
+                if r != 0:
+                    return
+                self.wake.emit()
+        threading.Thread(target=_loop, name='single-instance-waker', daemon=True).start()
+
+
 if __name__ == '__main__':
+    _install_frozen_relaunch_guard()
+    # A frozen exe started with interpreter-style args (-m pip ..., -c ...)
+    # must do nothing: it is a mistaken self-relaunch, not a real launch.
+    if getattr(sys, 'frozen', False) and len(sys.argv) > 1 and sys.argv[1] in ('-m', '-c'):
+        sys.exit(0)
     # When frozen into an exe, sys.executable is PS5Launcher.exe itself --
     # there is no separate python.exe to hand fps_overlay.py to. So instead
     # of spawning [sys.executable, script] (which just re-launches the
@@ -45302,6 +45416,9 @@ if __name__ == '__main__':
     _wants_cli = len(sys.argv) > 1 and (any((a in _cli_flags for a in sys.argv[1:])) or not any((a.startswith('-') for a in sys.argv[1:])))
     if _wants_cli:
         sys.exit(_cli_main())
+
+    if not _single_instance_acquire():
+        sys.exit(0)
 
     QLocale.setDefault(QLocale(QLocale.Language.English, QLocale.Country.UnitedStates))
     if _HAS_WEBENGINE:
@@ -45329,6 +45446,10 @@ if __name__ == '__main__':
     # sets up the tray icon -- the app is meant to start minimized to the
     # tray, not with the window shown. Don't call w.show() here.
     w = PS5Launcher()
+
+    _si_waker = _SingleInstanceWaker()
+    _si_waker.wake.connect(lambda: _safe_call(w._show_launcher))
+    _si_waker.start()
 
     _appdata = os.environ.get('APPDATA') or os.path.expanduser('~')
     _deps_flag = os.path.join(_appdata, 'PS5Launcher', 'deps_installed.flag')
