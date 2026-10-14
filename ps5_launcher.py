@@ -16604,6 +16604,123 @@ class ToggleSwitchRow(QAbstractButton):
         p.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap, self.text())
         # Focus uses the filled state above; keep the option borderless.
 
+class OverlayMetricToggle(QAbstractButton):
+    """ON/OFF switch used by the FPS-overlay settings column.
+
+    Written separately from ToggleSwitchRow on purpose.  It differs in three
+    ways that matter for the "buttons flip on their own" problem:
+
+    * It never takes keyboard focus.  After a mouse click a focusable button
+      keeps focus, and any later Space/Enter -- including the Key_Space the
+      gamepad layer injects through QApplication.sendEvent -- would flip it
+      again.  Gamepad activation goes through click() instead.
+    * Activations closer together than _MIN_GAP seconds are ignored, so a
+      double-click, a bouncing pointer device or a duplicated event can never
+      toggle it twice for one physical press.
+    * Programmatic updates (loading saved state) use set_state_silent() and
+      never emit toggled, so they can never be mistaken for a user change and
+      written back to the settings.
+    """
+    _MIN_GAP = 0.18
+
+    def __init__(self, text='', parent=None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setText(text)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAutoRepeat(False)
+        self.setMinimumHeight(46)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._sw_w, self._sw_h = (50, 26)
+        self._pos = 0.0
+        self._last_toggle = 0.0
+        self._anim = QPropertyAnimation(self, b'animPos', self)
+        self._anim.setDuration(140)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def _get_pos(self) -> float:
+        return self._pos
+
+    def _set_pos(self, v: float):
+        self._pos = v
+        self.update()
+    animPos = pyqtProperty(float, _get_pos, _set_pos)
+
+    def set_state_silent(self, checked: bool):
+        checked = bool(checked)
+        was = self.blockSignals(True)
+        try:
+            QAbstractButton.setChecked(self, checked)
+        finally:
+            self.blockSignals(was)
+        self._anim.stop()
+        self._pos = 1.0 if checked else 0.0
+        self.update()
+
+    def nextCheckState(self):
+        now = time.monotonic()
+        if now - self._last_toggle < self._MIN_GAP:
+            return
+        self._last_toggle = now
+        new = not self.isChecked()
+        QAbstractButton.setChecked(self, new)
+        self._anim.stop()
+        self._anim.setStartValue(self._pos)
+        self._anim.setEndValue(1.0 if new else 0.0)
+        self._anim.start()
+
+    def mouseDoubleClickEvent(self, ev):
+        # A double-click is two presses; the second must not toggle again.
+        ev.accept()
+
+    def keyPressEvent(self, ev):
+        ev.ignore()
+
+    def keyReleaseEvent(self, ev):
+        ev.ignore()
+
+    def sizeHint(self) -> QSize:
+        return QSize(260, 48)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        focused = bool(self.property('gpFocused'))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(55, 75, 200, 170) if focused else QColor(255, 255, 255, 6))
+        p.drawRoundedRect(r, 10, 10)
+        sw_w, sw_h = (self._sw_w, self._sw_h)
+        sw_x = r.right() - sw_w - 14
+        sw_y = r.center().y() - sw_h / 2
+        sw = QRectF(sw_x, sw_y, sw_w, sw_h)
+        t = self._pos
+        off_c, on_c = (QColor(110, 114, 130), QColor(46, 204, 113))
+        pill = QColor(int(off_c.red() + (on_c.red() - off_c.red()) * t),
+                      int(off_c.green() + (on_c.green() - off_c.green()) * t),
+                      int(off_c.blue() + (on_c.blue() - off_c.blue()) * t))
+        p.setBrush(pill)
+        p.drawRoundedRect(sw, sw_h / 2, sw_h / 2)
+        kd = sw_h - 6
+        kx = sw.left() + 3 + t * (sw.width() - kd - 6)
+        p.setBrush(QColor(255, 255, 255))
+        p.drawEllipse(QRectF(kx, sw.top() + 3, kd, kd))
+        p.setFont(QFont('Segoe UI', 7, QFont.Weight.Bold))
+        p.setPen(QColor(255, 255, 255, 190))
+        half = sw.width() * 0.5
+        if self.isChecked():
+            p.drawText(QRectF(sw.left() + 6, sw.top(), half, sw.height()),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, 'ON')
+        else:
+            p.drawText(QRectF(sw.right() - half - 6, sw.top(), half, sw.height()),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, 'OFF')
+        p.setFont(QFont('Segoe UI', 11))
+        p.setPen(QColor(255, 255, 255) if focused else QColor(221, 221, 255))
+        p.drawText(QRectF(16, 0, sw_x - 24, r.height()),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.text())
+        p.end()
+
 class HapticChoiceButton(QAbstractButton):
     enabledChanged = pyqtSignal(bool)
 
@@ -35904,6 +36021,23 @@ class PS5Launcher(QMainWindow):
         panel.move(margin, max(10, y))
         panel.raise_()
 
+    def _set_overlay_metric(self, key, value):
+        """Persist exactly one FPS-overlay metric.
+
+        Merges into the CURRENT stored dict (never a copy captured when the
+        panel was built), touches only `key`, and uses the debounced
+        _save_data().  It deliberately does not go through _apply_settings():
+        that re-syncs unrelated module state on the UI thread."""
+        try:
+            st = self.data.setdefault('settings', {})
+            m = dict(DEFAULT_SETTINGS['fps_overlay_metrics'])
+            m.update(st.get('fps_overlay_metrics', {}) or {})
+            m[key] = bool(value)
+            st['fps_overlay_metrics'] = m
+            self._save_data()
+        except Exception:
+            pass
+
     def _save_setting_now(self, **kw):
         s = dict(self.data.get('settings', {}))
         s.update(kw)
@@ -36477,52 +36611,29 @@ class PS5Launcher(QMainWindow):
         rot_l.addWidget(self._panel_action_button('Change Now (Wallpaper)', lambda: self._apply_random_app_background()))
 
         # --- FPS overlay ---------------------------------------------------
+        # Rewritten from scratch.  One source of truth (settings dict), one
+        # widget class (OverlayMetricToggle), one write path
+        # (_set_overlay_metric).  Every switch is its own block directly in
+        # the column so gamepad up/down moves through them one by one.
         fps_col, fps_l = self._panel_section_column(panel, 'FPS overlay')
         self._fps_panel_cbs = {}
-        saved_fps = dict(DEFAULT_SETTINGS['fps_overlay_metrics'])
-        saved_fps.update(s.get('fps_overlay_metrics', {}) or {})
         _fps_defs = [('fps', 'FPS'), ('cpu', 'CPU Usage'), ('cpu_temp', 'CPU Temperature'), ('gpu', 'GPU Usage'), ('gpu_temp', 'GPU Temperature'), ('gpu_model', 'GPU Model'), ('pd1', 'PD1'), ('id', 'ID (Input → Display)')]
-        # A ToggleSwitchRow's sizeHint is normally a fixed 340px, wide enough
-        # that the switch ends up far from short labels and the box bleeds
-        # into whatever's next in the row. Give these a narrower sizeHint
-        # (per-instance override, same trick _panel_card uses on paintEvent)
-        # so the switch sits right next to its own text.
-        _FPS_TOGGLE_W = 260
-
-        def _make_fps_toggle(key, label):
-            cb = ToggleSwitchRow(label)
-            cb.setChecked(bool(saved_fps.get(key, True)))
-            cb.sizeHint = lambda: QSize(_FPS_TOGGLE_W, 48)
-
-            def on_fps(c, k=key):
-                # Overlay metrics are read straight from self.data when the
-                # overlay is (re)built, so a plain debounced save is enough.
-                # Going through _apply_settings re-syncs every module-level
-                # setting (API keys, caches, network workers) on the UI thread
-                # for a single switch flip, which could freeze the whole panel.
-                try:
-                    st = self.data.setdefault('settings', {})
-                    m2 = dict(DEFAULT_SETTINGS['fps_overlay_metrics'])
-                    m2.update(st.get('fps_overlay_metrics', {}) or {})
-                    m2[k] = bool(cb.isChecked())
-                    st['fps_overlay_metrics'] = m2
-                    self._save_data()
-                except Exception:
-                    pass
-            cb.toggled.connect(on_fps)
-            self._fps_panel_cbs[key] = cb
-            return cb
-
-        # All metrics stacked in one card within the "FPS overlay" column,
-        # instead of split across several 2-per-column cards.
-        _fps_card = QWidget()
-        _fps_card_l = QVBoxLayout(_fps_card)
-        _fps_card_l.setContentsMargins(10, 8, 10, 8)
-        _fps_card_l.setSpacing(4)
+        current = dict(DEFAULT_SETTINGS['fps_overlay_metrics'])
+        current.update(self.data.get('settings', {}).get('fps_overlay_metrics', {}) or {})
         for key, label in _fps_defs:
-            _fps_card_l.addWidget(_make_fps_toggle(key, label))
-        self._panel_card(_fps_card)
-        fps_l.addWidget(_fps_card)
+            tg = OverlayMetricToggle(label)
+            tg.set_state_silent(bool(current.get(key, True)))
+            # Connected AFTER the initial state is set, and only ever fires
+            # for real user activations (see OverlayMetricToggle).
+            tg.toggled.connect(lambda checked, k=key: self._set_overlay_metric(k, checked))
+            block = QWidget()
+            bl = QVBoxLayout(block)
+            bl.setContentsMargins(10, 6, 10, 6)
+            bl.setSpacing(0)
+            bl.addWidget(tg)
+            self._panel_card(block)
+            fps_l.addWidget(block)
+            self._fps_panel_cbs[key] = tg
 
         # --- Lossless Scaling ---------------------------------------------------
         ls_col, ls_l = self._panel_section_column(panel, 'Lossless Scaling')
