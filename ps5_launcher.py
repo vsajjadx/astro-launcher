@@ -4383,26 +4383,51 @@ _igdb_lock = threading.Lock()
 
 def _set_igdb_credentials(client_id: str, client_secret: str):
     global _igdb_client_id, _igdb_client_secret, _igdb_token, _igdb_token_expires
-    with _igdb_lock:
-        _igdb_client_id = (client_id or '').strip()
-        _igdb_client_secret = (client_secret or '').strip()
-        _igdb_token = ''
-        _igdb_token_expires = 0.0
+    client_id = (client_id or '').strip()
+    client_secret = (client_secret or '').strip()
+    # Called on the UI thread every time any setting is saved.  Never block
+    # here on a background thread's network call, and don't throw away a
+    # valid token when the credentials did not actually change.
+    if not _igdb_lock.acquire(timeout=0.05):
+        # A worker is mid-request.  Only the (rare) real credential change
+        # matters, so just record it without waiting on the lock.
+        if client_id != _igdb_client_id or client_secret != _igdb_client_secret:
+            _igdb_client_id = client_id
+            _igdb_client_secret = client_secret
+            _igdb_token = ''
+            _igdb_token_expires = 0.0
+        return
+    try:
+        if client_id != _igdb_client_id or client_secret != _igdb_client_secret:
+            _igdb_client_id = client_id
+            _igdb_client_secret = client_secret
+            _igdb_token = ''
+            _igdb_token_expires = 0.0
+    finally:
+        _igdb_lock.release()
 
 def _igdb_ensure_token() -> str:
     global _igdb_token, _igdb_token_expires
+    # Snapshot state under the lock, but do the network call OUTSIDE it so
+    # the UI thread (settings save) can never be blocked by a slow request.
     with _igdb_lock:
-        if not _igdb_client_id or not _igdb_client_secret:
+        cid, secret = (_igdb_client_id, _igdb_client_secret)
+        if not cid or not secret:
             return ''
         if _igdb_token and time.time() < _igdb_token_expires - 60:
             return _igdb_token
-        auth_url = f'https://id.twitch.tv/oauth2/token?client_id={urllib.parse.quote(_igdb_client_id)}&client_secret={urllib.parse.quote(_igdb_client_secret)}&grant_type=client_credentials'
-        req = urllib.request.Request(auth_url, method='POST', headers={'User-Agent': _REAL_UA})
-        with urllib.request.urlopen(req, timeout=8) as r:
-            data = json.loads(r.read().decode('utf-8', 'ignore'))
-        _igdb_token = data.get('access_token', '') or ''
-        _igdb_token_expires = time.time() + float(data.get('expires_in', 3600))
-        return _igdb_token
+    auth_url = f'https://id.twitch.tv/oauth2/token?client_id={urllib.parse.quote(cid)}&client_secret={urllib.parse.quote(secret)}&grant_type=client_credentials'
+    req = urllib.request.Request(auth_url, method='POST', headers={'User-Agent': _REAL_UA})
+    with urllib.request.urlopen(req, timeout=8) as r:
+        data = json.loads(r.read().decode('utf-8', 'ignore'))
+    token = data.get('access_token', '') or ''
+    expires = time.time() + float(data.get('expires_in', 3600))
+    with _igdb_lock:
+        # Only store it if the credentials weren't changed while we waited.
+        if (_igdb_client_id, _igdb_client_secret) == (cid, secret):
+            _igdb_token = token
+            _igdb_token_expires = expires
+    return token
 
 def _igdb_candidate_urls(title: str) -> list:
     token = ''
@@ -4698,11 +4723,20 @@ def _run_title_map_auto_update(interval_days: float=_TITLE_MAP_DEFAULT_INTERVAL_
         _save_extra_title_map_to_disk(data)
 
 
+_title_map_worker_thread = None
+
 def _start_title_map_auto_update_thread(interval_days: float=_TITLE_MAP_DEFAULT_INTERVAL_DAYS, enabled: bool=True):
     """Launch-time hook: fires the (possibly-due) update check on a daemon
     thread so it never blocks UI startup. Cheap to call every launch --
-    _run_title_map_auto_update itself decides whether it's actually due."""
+    _run_title_map_auto_update itself decides whether it's actually due.
+
+    This is also reached from every settings save, so it must be idempotent:
+    if a worker is still running, do not stack another one behind it."""
+    global _title_map_worker_thread
     if not enabled:
+        return
+    t = _title_map_worker_thread
+    if t is not None and t.is_alive():
         return
 
     def _worker():
@@ -4710,7 +4744,8 @@ def _start_title_map_auto_update_thread(interval_days: float=_TITLE_MAP_DEFAULT_
             _run_title_map_auto_update(interval_days=interval_days)
         except Exception:
             pass
-    threading.Thread(target=_worker, name='TitleMapAutoUpdate', daemon=True).start()
+    _title_map_worker_thread = threading.Thread(target=_worker, name='TitleMapAutoUpdate', daemon=True)
+    _title_map_worker_thread.start()
 
 _rawg_api_key = '107f9ade4b2f4e53a308ad59b3172ac4'
 _rawg_enabled = False
@@ -36460,9 +36495,20 @@ class PS5Launcher(QMainWindow):
             cb.sizeHint = lambda: QSize(_FPS_TOGGLE_W, 48)
 
             def on_fps(c, k=key):
-                m2 = dict(self.data.get('settings', {}).get('fps_overlay_metrics', DEFAULT_SETTINGS['fps_overlay_metrics']))
-                m2[k] = cb.isChecked()
-                _safe_call(lambda: self._save_setting_now(fps_overlay_metrics=m2))
+                # Overlay metrics are read straight from self.data when the
+                # overlay is (re)built, so a plain debounced save is enough.
+                # Going through _apply_settings re-syncs every module-level
+                # setting (API keys, caches, network workers) on the UI thread
+                # for a single switch flip, which could freeze the whole panel.
+                try:
+                    st = self.data.setdefault('settings', {})
+                    m2 = dict(DEFAULT_SETTINGS['fps_overlay_metrics'])
+                    m2.update(st.get('fps_overlay_metrics', {}) or {})
+                    m2[k] = bool(cb.isChecked())
+                    st['fps_overlay_metrics'] = m2
+                    self._save_data()
+                except Exception:
+                    pass
             cb.toggled.connect(on_fps)
             self._fps_panel_cbs[key] = cb
             return cb
