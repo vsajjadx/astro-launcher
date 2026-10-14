@@ -35340,6 +35340,25 @@ class PS5Launcher(QMainWindow):
                 # Escape, the controller's circle/options path, and selecting
                 # another drawer item still close/rebuild the panel.  Mouse
                 # presses must always reach the actual child widget here.
+                #
+                # A press that is clearly OUTSIDE both the panel and the
+                # drawer must dismiss the panel (previously nothing handled
+                # this, so the panel stayed stuck on screen).  This uses plain
+                # geometry checks, not widgetAt(), so it is not affected by
+                # the stale-hit-test problem described above.
+                if event.button() == Qt.MouseButton.LeftButton and QApplication.activePopupWidget() is None:
+                    try:
+                        gp = event.globalPosition().toPoint() if hasattr(event, 'globalPosition') else event.globalPos()
+                        in_panel = panel.rect().contains(panel.mapFromGlobal(gp))
+                        in_drawer = (drawer is not None and drawer.isVisible()
+                                     and drawer.rect().contains(drawer.mapFromGlobal(gp)))
+                        target = QApplication.widgetAt(gp)
+                        in_launcher = target is self or (target is not None and self.isAncestorOf(target))
+                        if in_launcher and not in_panel and not in_drawer:
+                            self._dismiss_settings_from_outside_click()
+                            return True
+                    except RuntimeError:
+                        pass
                 return super().eventFilter(obj, event)
             if drawer is not None and drawer.isVisible() and (drawer.maximumHeight() > 0):
                 gp = event.globalPosition().toPoint() if hasattr(event, 'globalPosition') else event.globalPos()
@@ -35975,6 +35994,13 @@ class PS5Launcher(QMainWindow):
                 ct._timer.start(16)
             except Exception:
                 pass
+
+    def _dismiss_settings_from_outside_click(self):
+        """Close the settings panel (and collapse the drawer) after a click outside them."""
+        self._close_settings_panel()
+        drawer = getattr(self, '_settings_drawer', None)
+        if drawer is not None and drawer.isVisible() and drawer.maximumHeight() > 0:
+            self._toggle_settings_drawer()
 
     def _close_settings_panel(self):
         panel = getattr(self, '_settings_panel', None)
